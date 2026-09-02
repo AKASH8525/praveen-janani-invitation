@@ -712,74 +712,240 @@ function initGallery() {
 }
 
 /* ==========================================================================
-   8. INTERACTIVE WISHES / BLESSINGS GUESTBOOK
+   8. GOOGLE SHEETS CLOUD GUESTBOOK & ADMIN DELETE SYSTEM
    ========================================================================== */
+// 👉 Connected Google Apps Script Web App for Lifetime Cloud Storage:
+const GOOGLE_SHEET_API_URL = "https://script.google.com/macros/s/AKfycbw1RzN-MasuNxWNrAtIHJj_Crq0C6TUWHkE15dUzeK42TKWHB9VavzhTEsqx2xn9uXTvA/exec";
+const ADMIN_SECRET_PIN = "1709"; // Secret PIN to delete wishes
+
 function initWishes() {
   const form = document.getElementById('wishesForm');
   const nameInput = document.getElementById('wishName');
   const msgInput = document.getElementById('wishMessage');
   const wishesList = document.getElementById('wishesList');
+  const adminStatusArea = document.getElementById('adminStatusArea');
+  const submitBtn = form ? form.querySelector('button[type="submit"]') : null;
 
-  // Initial Sample Wishes
+  let isAdmin = false;
+
+  // Default initial sample wishes if cloud sheet is empty
   const defaultWishes = [
-    { name: "Karthik & Family", message: "Hearty congratulations to Praveen and Janani! Wishing you both a lifetime of happiness, love, and togetherness! ✨❤️", time: "Just now" },
-    { name: "Divya Ramesh", message: "So happy for you both! Looking forward to celebrating on September 17th! 🎉💍", time: "1 hour ago" },
-    { name: "Suresh Kumar", message: "Congratulations Praveen & Janani! May God shower endless blessings upon your new journey. 🌸🙏", time: "Yesterday" }
+    { id: "1", name: "Karthik & Family", message: "Hearty congratulations to Praveen and Janani! Wishing you both a lifetime of happiness, love, and togetherness! ✨❤️", time: "Just now" },
+    { id: "2", name: "Divya Ramesh", message: "So happy for you both! Looking forward to celebrating on September 17th! 🎉💍", time: "1 hour ago" },
+    { id: "3", name: "Suresh Kumar", message: "Congratulations Praveen & Janani! May God shower endless blessings upon your new journey. 🌸🙏", time: "Yesterday" }
   ];
 
-  let savedWishes = [];
+  let currentWishes = [];
   try {
-    const stored = localStorage.getItem('praveen_janani_wishes');
-    savedWishes = stored ? JSON.parse(stored) : defaultWishes;
+    const cached = localStorage.getItem('praveen_janani_cloud_wishes');
+    currentWishes = cached ? JSON.parse(cached) : defaultWishes;
   } catch (e) {
-    savedWishes = defaultWishes;
+    currentWishes = defaultWishes;
+  }
+
+  function formatDisplayTime(rawTime) {
+    if (!rawTime) return "Recent";
+    if (rawTime.includes("GMT") || rawTime.length > 25) {
+      try {
+        const d = new Date(rawTime);
+        if (!isNaN(d.getTime())) {
+          return d.toLocaleDateString("en-IN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+        }
+      } catch (e) {}
+    }
+    return rawTime;
   }
 
   function renderWishes() {
     if (!wishesList) return;
     wishesList.innerHTML = '';
-    savedWishes.forEach(w => {
+
+    if (adminStatusArea) {
+      if (isAdmin) {
+        adminStatusArea.style.display = 'block';
+        adminStatusArea.innerHTML = `
+          <div class="admin-status-badge">
+            <span>👑</span> Admin Mode Active • You can delete any message
+          </div>
+        `;
+      } else {
+        adminStatusArea.style.display = 'none';
+      }
+    }
+
+    if (currentWishes.length === 0) {
+      wishesList.innerHTML = '<div style="color: var(--cream-muted); font-size: 0.9rem; padding: 15px;">No wishes yet. Be the first to bless the couple! 🌸</div>';
+      return;
+    }
+
+    currentWishes.forEach(w => {
       const card = document.createElement('div');
       card.className = 'wish-card';
       card.innerHTML = `
         <div class="wish-header">
           <span class="wish-author">${escapeHTML(w.name)}</span>
-          <span class="wish-time">${escapeHTML(w.time)}</span>
+          <div class="wish-header-right">
+            <span class="wish-time">${escapeHTML(formatDisplayTime(w.time))}</span>
+            ${isAdmin ? `<button class="wish-delete-btn" data-id="${escapeHTML(w.id)}" title="Delete message">🗑️ Delete</button>` : ''}
+          </div>
         </div>
         <div class="wish-body">${escapeHTML(w.message)}</div>
       `;
+
+      if (isAdmin) {
+        const delBtn = card.querySelector('.wish-delete-btn');
+        if (delBtn) {
+          delBtn.addEventListener('click', () => deleteWish(w.id, w.name));
+        }
+      }
+
       wishesList.appendChild(card);
     });
   }
 
   renderWishes();
 
+  // 1. Fetch Real Wishes from Google Sheet on Page Load
+  async function fetchCloudWishes() {
+    try {
+      const res = await fetch(GOOGLE_SHEET_API_URL);
+      const data = await res.json();
+      if (data && data.status === "success" && Array.isArray(data.wishes) && data.wishes.length > 0) {
+        currentWishes = data.wishes;
+        try {
+          localStorage.setItem('praveen_janani_cloud_wishes', JSON.stringify(currentWishes));
+        } catch (e) {}
+        renderWishes();
+      }
+    } catch (err) {
+      console.log("Using cached wishes:", err);
+    }
+  }
+
+  fetchCloudWishes();
+
+  // 2. Submit New Wish to Google Sheet
   if (form) {
-    form.addEventListener('submit', (e) => {
+    form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const name = nameInput.value.trim();
       const msg = msgInput.value.trim();
 
       if (!name || !msg) return;
 
+      const tempId = String(Date.now());
+      const tempTime = "Just now";
+
       const newWish = {
+        id: tempId,
         name: name,
         message: msg,
-        time: "Just now"
+        time: tempTime
       };
 
-      savedWishes.unshift(newWish);
-      try {
-        localStorage.setItem('praveen_janani_wishes', JSON.stringify(savedWishes));
-      } catch (err) {}
-
+      // Optimistic UI update
+      currentWishes.unshift(newWish);
       renderWishes();
       nameInput.value = '';
       msgInput.value = '';
 
-      // Sparkle celebration on submission
+      // Sparkle celebration
       createSparkleBurst(window.innerWidth / 2, window.innerHeight / 2);
+
+      // Save locally
+      try {
+        localStorage.setItem('praveen_janani_cloud_wishes', JSON.stringify(currentWishes));
+      } catch (err) {}
+
+      // Cloud save to Google Sheet
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span>⏳</span> Saving Blessing...';
+      }
+
+      try {
+        await fetch(GOOGLE_SHEET_API_URL, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            action: 'add',
+            name: name,
+            message: msg
+          })
+        });
+        setTimeout(fetchCloudWishes, 2000);
+      } catch (postErr) {
+        console.log("Cloud sync error:", postErr);
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = '<span>💌</span> Send Blessing';
+        }
+      }
     });
+  }
+
+  // 3. Admin Delete Wish Function
+  async function deleteWish(wishId, authorName) {
+    const confirmDelete = confirm(`Admin: Are you sure you want to delete the blessing from "${authorName}"?`);
+    if (!confirmDelete) return;
+
+    currentWishes = currentWishes.filter(w => String(w.id) !== String(wishId));
+    renderWishes();
+    try {
+      localStorage.setItem('praveen_janani_cloud_wishes', JSON.stringify(currentWishes));
+    } catch (e) {}
+
+    // Cloud Delete in Google Sheet
+    try {
+      await fetch(GOOGLE_SHEET_API_URL, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          action: 'delete',
+          id: wishId,
+          adminPin: ADMIN_SECRET_PIN
+        })
+      });
+      setTimeout(fetchCloudWishes, 2000);
+    } catch (delErr) {
+      console.log("Delete error:", delErr);
+    }
+  }
+
+  // 4. Secret Admin Activation (Tap the top PJ Monogram 3 times)
+  let pjClickCount = 0;
+  let pjClickTimer = null;
+  const pjCrest = document.querySelector('.pj-monogram-crest');
+
+  if (pjCrest) {
+    pjCrest.style.cursor = 'pointer';
+    pjCrest.addEventListener('click', () => {
+      pjClickCount++;
+      clearTimeout(pjClickTimer);
+      pjClickTimer = setTimeout(() => { pjClickCount = 0; }, 1500);
+
+      if (pjClickCount >= 3) {
+        pjClickCount = 0;
+        const pin = prompt("👑 Enter Admin Secret PIN to manage guest wishes:");
+        if (pin === ADMIN_SECRET_PIN) {
+          isAdmin = true;
+          renderWishes();
+          alert("✅ Admin Mode Activated! You can now delete any blessing with the red Delete button.");
+        } else if (pin !== null) {
+          alert("❌ Incorrect PIN.");
+        }
+      }
+    });
+  }
+
+  // Check URL query parameter: ?admin=1709
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.get('admin') === ADMIN_SECRET_PIN) {
+    isAdmin = true;
+    renderWishes();
   }
 }
 
